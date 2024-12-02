@@ -1,4 +1,5 @@
 #include "http-server.h"
+#include "http-server.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -7,12 +8,12 @@
 #include <assert.h>
 
 /**
- * GNEREAL STRUCTURE OF THE FILE ->
+ * GENERAL STRUCTURE OF THE FILE ->
  * 
  * HTTP constant codes
  * 
  * get_time() -- function to easily get time string
- * hext_to_byte(char) -- for url decoding purposes
+ * hex_to_byte(char) -- for url decoding purposes
  * url_decode(char, char) -- for url decoding purposes
  * 
  * Struct objects:
@@ -24,14 +25,19 @@
  * 
  * Chat server methods:
  *      uint8_t add_chat(char* username, char* message)
- *      uint8_t add_reaction(char* username, char* message, char* id)
- *      unit8_t reset()
+ *      uint8_t add_reaction(int id, char* username, char* message)
+ *      uint8_t reset()
  * 
  * Handler methods:
  *      Error handling: 404
+ *  
+ *      helper function: respond_with_chats(int, char*)
+ *                       separate(char*, char*)
+ *                       write_message(int, const char*, char*)
+ * 
  *      handle_root()
  *      handle_chat()
- *      handle_path()
+ *      handle_post()
  *      handle_react()
  *      handle_reset()
  *      handle_response()
@@ -58,23 +64,20 @@ uint32_t chat_id = 0;
  * 
  * @return "YYY-MM-DD HH:MM"
  */
-char* get_time(){
+char* get_time() {
     time_t t = time(NULL);
-
-    //converts to local time
     struct tm tm = *localtime(&t);
 
-    // "YYYY-MM-DD HH:MM:SS" requires 19 characters and 1 for null terminator
-    static char time_str[20];
-    
-    //formats the time into the timr_str string
-    snprintf(time_str, sizeof(time_str), "%04d-%02d-%02d %02d:%02d:%02d", 
-        tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-        tm.tm_hour, tm.tm_min, tm.tm_sec);
+    char *time_str = malloc(20); //allocate 20 bytes for "YYYY-MM-DD HH:MM:SS"
+    if (!time_str) return NULL;
 
-    //returns a string in format "20XX-MM-DD HH:MM:SS"
+    snprintf(time_str, 20, "%04d-%02d-%02d %02d:%02d:%02d",
+             tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+             tm.tm_hour, tm.tm_min, tm.tm_sec);
+
     return time_str;
 }
+
 
 
 /**
@@ -166,27 +169,25 @@ Reaction *new_reaction(char *username, char* message){
 
 Chat *new_chat(char *username, char *message) {
     Chat *newChat = malloc(sizeof(Chat));
+    if (!newChat) return NULL;
 
     newChat->id = chat_id;
 
     newChat->user = malloc(16);
-    strncpy(newChat->user, username, 15);
+    if (newChat->user) strncpy(newChat->user, username, 15);
     newChat->user[15] = '\0';
 
     newChat->message = malloc(256);
-    strncpy(newChat->message, message, 255);
+    if (newChat->message) strncpy(newChat->message, message, 255);
     newChat->message[255] = '\0';
 
-    //allocate memory for the timestamp and copy the value
-    char *current_time = get_time();
-    newChat->timestamp = malloc(strlen(current_time) + 1);
-    strcpy(newChat->timestamp, current_time);
-
+    newChat->timestamp = get_time();
     newChat->num_reactions = 0;
     newChat->reactions = malloc(100 * sizeof(Reaction));
 
     return newChat;
 }
+
 
 
 ChatList *new_chat_list(){
@@ -204,7 +205,8 @@ ChatList *new_chat_list(){
 /**
  * Chat server methods:
  *   uint8_t add_chat(char* username, char* message)
- *   uint8_t add_reaction(char* username, char* message, char* id)
+ *   uint8_t add_reaction(int id, char* username, char* message)
+ *   uint8_t reset()
  */
 ChatList *chatList = NULL;
 
@@ -246,8 +248,18 @@ uint8_t add_chat(char *username, char *message){
 }
 
 uint8_t add_reaction(int id, char *username, char *message) {
+    // Check if chatList is null
+    if (chatList == NULL || id < 0 || id >= chatList->size) {
+        return 0;
+    }
+
     //check if the specific chat already has 100 reactions
     if (chatList->chat[id].num_reactions >= 100) {
+        return 0;
+    }
+
+    // Validate message length
+    if (strlen(message) > 15) {
         return 0;
     }
 
@@ -262,6 +274,24 @@ uint8_t add_reaction(int id, char *username, char *message) {
     return 1;
 }
 
+uint8_t reset() {
+    if (chatList != NULL) {
+        for (int i = 0; i < chatList->size; i++) {
+            free(chatList->chat[i].reactions);
+            free(chatList->chat[i].user);
+            free(chatList->chat[i].message);
+            free(chatList->chat[i].timestamp);
+        }
+        free(chatList->chat);
+        free(chatList);
+        chatList = NULL;
+    }
+
+    chat_id = 0;
+
+    return 1;
+}
+
 
 
 /**
@@ -269,8 +299,6 @@ uint8_t add_reaction(int id, char *username, char *message) {
  * 
  * Error:
  *      404
- *      200
- *      500
  * 
  * respond_with_chat(int, char*) -- prints out all the chats
  * 
@@ -278,11 +306,11 @@ uint8_t add_reaction(int id, char *username, char *message) {
  *      /        --> root path
  *      /chat
  * 
- *      
- *      string_separater(char*, char*)
- *      /post
- *
+ *      helper functions: respond_with_chats(int, char*)
+ *                        separate(char*, char*)
+ *                        write_message(int, const char*, char*)
  * 
+ *      /post
  *      /react
  *      /reset
  */
@@ -303,7 +331,7 @@ void respond_with_chats(int client_socket, char *path) {
     char reaction_user_space[21] = "                    "; //20 spaces + null terminator
 
     //iterate through all chats
-    for (int i = 0; i < chat_id; i++) {
+    for (int i = 0; i < chatList->size; i++) {
         char padded_username[16]; //fixed size for right-aligned username
         snprintf(padded_username, sizeof(padded_username), "%15s", chatList->chat[i].user);
 
@@ -345,150 +373,118 @@ void handle_root(int client_socket, char *path){
 
 void handle_chat(int client_socket, char *path){
     write(client_socket, HTTP_200_OK, strlen(HTTP_200_OK));
+
     if(chatList == NULL){
         write(client_socket, "No chats available\n", strlen("No chats available\n"));
         return;
     }
-
     respond_with_chats(client_socket, path);
 }
 
 
-char* separate(char* key, char* path, int limit, int *error_flag) {
-    char *key_pointer = strstr(path, key);
+char* separate(char* key, char* path) {
+    //prepare the key to search for (e.g., "user=")
+    char search_key[257];
+    snprintf(search_key, sizeof(search_key), "%s", key);
+
+    //find the start of the parameter in the path
+    char* key_pointer = strstr(path, search_key);
     if (!key_pointer) return NULL;
 
-    key_pointer += strlen(key);
+    //move past the key and '='
+    key_pointer += strlen(search_key);
 
     //allocate memory for the extracted value
-    char *value = malloc(limit + 1); //include space for null terminator
-    if (!value) return NULL;
+    char* value = malloc(257);
 
+    //extract the value up to the next '&' or the end of the string
     int i = 0;
-    while (i < limit && key_pointer[i] != '&' && key_pointer[i] != '\0') {
+    while (i < 256 && key_pointer[i] != '&' && key_pointer[i] != '\0') {
         value[i] = key_pointer[i];
         i++;
     }
+    value[i] = '\0';
 
-    if (key_pointer[i] != '&' && key_pointer[i] != '\0') {
-        //if the string exceeds the limit
-        *error_flag = 1;
-        free(value);
-        return NULL;
-    }
-
-    value[i] = '\0'; //null-terminate the extracted string
     return value;
 }
 
 
-
-void handle_post(int client_socket, char *path) {
-    write(client_socket, HTTP_200_OK, strlen(HTTP_200_OK));
-
-    int error_flag = 0;
-
-    //separate username and message with validation
-    char *username = separate("user=", path, 15, &error_flag);
-    char *message = separate("message=", path, 255, &error_flag);
-
-    if (error_flag) {
-        write(client_socket, "Error: Username or message exceeds allowed length\n",
-              strlen("Error: Username or message exceeds allowed length\n"));
-        free(username);
-        free(message);
-        return;
-    }
-
-    if (!username || !message) {
-        write(client_socket, "Error: Invalid username or message\n",
-              strlen("Error: Invalid username or message\n"));
-        free(username);
-        free(message);
-        return;
-    }
-
-    //add the chat and print all chats
-    if (add_chat(username, message) == 0) {
-        write(client_socket, "Error: Maximum number of chats reached\n",
-              strlen("Error: Maximum number of chats reached\n"));
-    }
-
-    free(username);
-    free(message);
-
-    respond_with_chats(client_socket, path);
+void write_500message(int client_socket, char* message){
+    write(client_socket, HTTP_500_INTERNAL_SERVER, strlen(HTTP_500_INTERNAL_SERVER));
+    write(client_socket, message, strlen(message));
 }
 
 
+void handle_post(int client_socket, char *path) {
+    char* username = separate("user=", path);
+    char* message = separate("message=", path);
+    
+    //check if either field is missing
+    if(!username){ write_500message(client_socket, "Username field is missing\n"); return; }
+    if(!message){ write_500message(client_socket, "Message field is missing\n"); return; }
 
-void handle_react(int client_socket, char *path) {
-    if (chatList == NULL) {
-        write(client_socket, "Error: No chats available to add reactions to.\n",
-              strlen("Error: No chats available to add reactions to.\n"));
-        return;
-    }
+    //check if either field is empty
+    if(strlen(username) == 0){ write_500message(client_socket, "Username can not be empty\n"); return; }
+    if(strlen(message) == 0){ write_500message(client_socket, "Message can not be empty\n"); return; }
 
-    int error_flag = 0;
+    //check if the fields are within limit
+    if(strlen(username) > 15){ write_500message(client_socket, "Username can not exceed 15 characters\n"); return; }
+    if(strlen(message) > 255){ write_500message(client_socket, "Message can not exceed 255 characters\n"); return; }
 
-    // Separate id, username, and message with validation
-    char *id_str = separate("id=", path, 7, &error_flag);
-    char *username = separate("user=", path, 15, &error_flag);
-    char *message = separate("message=", path, 15, &error_flag);
-
-    if (error_flag) {
-        write(client_socket, HTTP_500_INTERNAL_SERVER, strlen(HTTP_500_INTERNAL_SERVER)); // Add the status line
-        write(client_socket, "Error: Username or reaction exceeds allowed length\n",
-              strlen("Error: Username or reaction exceeds allowed length\n"));
-        free(id_str);
-        free(username);
-        free(message);
-        return;
-    }
-
-    if (!id_str || !username || !message) {
-        write(client_socket, HTTP_500_INTERNAL_SERVER, strlen(HTTP_500_INTERNAL_SERVER)); // Add the status line
-        write(client_socket, "Error: Invalid id, username, or message\n",
-              strlen("Error: Invalid id, username, or message\n"));
-        free(id_str);
-        free(username);
-        free(message);
-        return;
-    }
-
-    // Check if id is valid
-    int id = atoi(id_str) - 1;
-    free(id_str); // No longer needed
-    if (id < 0 || id >= chatList->size) {
-        write(client_socket, HTTP_500_INTERNAL_SERVER, strlen(HTTP_500_INTERNAL_SERVER)); // Add the status line
-        write(client_socket, "Error: Chat with the specified ID does not exist.\n",
-              strlen("Error: Chat with the specified ID does not exist.\n"));
-        free(username);
-        free(message);
-        return;
-    }
-
-    // Add the reaction
-    if (add_reaction(id, username, message) == 0) {
-        write(client_socket, HTTP_500_INTERNAL_SERVER, strlen(HTTP_500_INTERNAL_SERVER)); // Add the status line
-        write(client_socket, "Error: Maximum number of reactions on this chat reached\n",
-              strlen("Error: Maximum number of reactions on this chat reached\n"));
-        free(username);
-        free(message);
+    if(add_chat(username, message) == 0){
+        write_500message(client_socket, "Max number of chats reached (100k) - cannot add more\n");
         return;
     }
     else{
+        //if they're not missing or empty or exceed character limit, then pass HTTP_200_OK message
         write(client_socket, HTTP_200_OK, strlen(HTTP_200_OK));
     }
-
+    
     free(username);
     free(message);
 
     respond_with_chats(client_socket, path);
 }
 
+void handle_react(int client_socket, char *path) {
+    if(!chatList){ write_500message(client_socket, "No chats to add a reaction to\n"); return; }
 
+    char* username = separate("user=", path);
+    char* message = separate("message=", path);
+    char* id_str = separate("id=", path);
 
+    //check if any field is missing
+    if(!id_str){ write_500message(client_socket, "Id field is missing\n"); return; }
+    if(!username){ write_500message(client_socket, "Username field is missing\n"); return; }
+    if(!message){ write_500message(client_socket, "Message field is missing\n"); return; }
+
+    //check if any field is empty
+    if(strlen(id_str) == 0){ write_500message(client_socket, "Id can not be empty\n"); return; }
+    if(strlen(username) == 0){ write_500message(client_socket, "Username can not be empty\n"); return; }
+    if(strlen(message) == 0){ write_500message(client_socket, "Message can not be empty\n"); return; }
+
+    //check if all fields are within limit
+    if(strlen(username) > 15){ write_500message(client_socket, "Username can not exceed 15 characters\n"); return; }
+    if(strlen(message) > 15){ write_500message(client_socket, "Reaction message can not exceed 15 characters\n"); return; }
+
+    int id = atoi(id_str) - 1;
+    if(id > chatList->size){ write_500message(client_socket, "Chat with specified id does not exist\n"); return; }
+
+    if(add_reaction(id, username, message) == 0){
+        write_500message(client_socket, "Max number of reactions reached (100) - cannot add more\n");
+        return;
+    }
+    else{
+        //if no field is missing, or is empty, or exceeds character limit/is valid, then pass HTTP_200_OK message
+        write(client_socket, HTTP_200_OK, strlen(HTTP_200_OK));
+    }
+
+    free(id_str);
+    free(username);
+    free(message);
+
+    respond_with_chats(client_socket, path);
+}
 
 void handle_reset(int client_socket, char *path) {
     if (chatList != NULL) {
@@ -508,16 +504,6 @@ void handle_reset(int client_socket, char *path) {
     write(client_socket, HTTP_200_OK, strlen(HTTP_200_OK));
 }
 
-
-/**
- * Handles actions based on the path type:
- * 
- * /chats --> prints out all chats
- * /post --> posts the chat and prints out all chats
- * /react --> adds a new reaction in the given chat id
- * /reset --> removes everything and frees the memory
- * 
- */
 /**
  * Handles actions based on the path type:
  * 
