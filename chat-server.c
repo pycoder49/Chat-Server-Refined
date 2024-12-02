@@ -39,6 +39,7 @@
  *      handle_chat()
  *      handle_post()
  *      handle_react()
+ *      handle_edit()
  *      handle_reset()
  *      handle_response()
  * 
@@ -188,8 +189,6 @@ Chat *new_chat(char *username, char *message) {
     return newChat;
 }
 
-
-
 ChatList *new_chat_list(){
     ChatList *newChatList = malloc(sizeof(ChatList));
 
@@ -211,23 +210,17 @@ ChatList *new_chat_list(){
 ChatList *chatList = NULL;
 
 uint8_t add_chat(char *username, char *message){
-    if(!chatList){
-        chatList = new_chat_list();
-    }
+    if(!chatList) chatList = new_chat_list();
 
     //max capacity reached
-    if(chatList->size >= 100000){
-        return 0;
-    }
+    if(chatList->size >= 100000) return 0;
 
     //dynamically allocate memory if size >= capacity
     if(chatList->size >= chatList->capacity){
         int new_capacity = chatList->capacity * 2;
 
         //making sure it does not exceed 100k capacity limit
-        if(new_capacity > 100000){
-            new_capacity = 100000;
-        }
+        if(new_capacity > 100000) new_capacity = 100000;
 
         Chat *new_array = realloc(chatList->chat, sizeof(Chat) * new_capacity);
 
@@ -243,7 +236,6 @@ uint8_t add_chat(char *username, char *message){
     chat_id++;
 
     free(newChat);
-
     return 1;
 }
 
@@ -254,14 +246,10 @@ uint8_t add_reaction(int id, char *username, char *message) {
     }
 
     //check if the specific chat already has 100 reactions
-    if (chatList->chat[id].num_reactions >= 100) {
-        return 0;
-    }
+    if (chatList->chat[id].num_reactions >= 100) return 0;
 
     // Validate message length
-    if (strlen(message) > 15) {
-        return 0;
-    }
+    if (strlen(message) > 15) return 0;
 
     Reaction *newReaction = new_reaction(username, message);
 
@@ -286,12 +274,9 @@ uint8_t reset() {
         free(chatList);
         chatList = NULL;
     }
-
     chat_id = 0;
-
     return 1;
 }
-
 
 
 /**
@@ -381,7 +366,6 @@ void handle_chat(int client_socket, char *path){
     respond_with_chats(client_socket, path);
 }
 
-
 char* separate(char* key, char* path) {
     //prepare the key to search for (e.g., "user=")
     char search_key[257];
@@ -408,12 +392,10 @@ char* separate(char* key, char* path) {
     return value;
 }
 
-
 void write_500message(int client_socket, char* message){
     write(client_socket, HTTP_500_INTERNAL_SERVER, strlen(HTTP_500_INTERNAL_SERVER));
     write(client_socket, message, strlen(message));
 }
-
 
 void handle_post(int client_socket, char *path) {
     char* username = separate("user=", path);
@@ -486,6 +468,43 @@ void handle_react(int client_socket, char *path) {
     respond_with_chats(client_socket, path);
 }
 
+void handle_edit(int client_socket, char *path){
+    if(!chatList){ write_500message(client_socket, "No chats to edit\n"); return; }
+
+    char* message = separate("message=", path);
+    char* id_str = separate("id=", path);
+
+    //check if any field is missing
+    if(!id_str){ write_500message(client_socket, "Id field is missing\n"); return; }
+    if(!message){ write_500message(client_socket, "Message field is missing\n"); return; }
+
+    //check if any field is empty
+    if(strlen(id_str) == 0){ write_500message(client_socket, "Id can not be empty\n"); return; }
+    if(strlen(message) == 0){ write_500message(client_socket, "Message can not be empty\n"); return; }
+
+    //check if all fields are within limits
+    if(strlen(message) > 255){ write_500message(client_socket, "Reaction message can not exceed 255 characters\n"); return; }
+    
+    int id = atoi(id_str) - 1;
+    if(id < 0 || id >= chatList->size){ write_500message(client_socket, "Chat with specified id does not exist\n"); return; }
+
+    //allocate new memory for the message and copy it
+    char* new_message = malloc(256);
+    strncpy(new_message, message, 255);
+    new_message[255] = '\0';
+
+    //free the old message and replace with the new one
+    free(chatList->chat[id].message);
+    chatList->chat[id].message = new_message;
+
+    //free the temporary strings
+    free(id_str);
+    free(message);
+
+    write(client_socket, HTTP_200_OK, strlen(HTTP_200_OK));
+    respond_with_chats(client_socket, path);
+}
+
 void handle_reset(int client_socket, char *path) {
     if (chatList != NULL) {
         for (int i = 0; i < chatList->size; i++) {
@@ -544,7 +563,11 @@ void handle_response(char *request, int client_socket) {
     else if (strncmp(path_decoded, "/react", strlen("/react")) == 0) {
         printf("SERVER LOG: Handling /react request\n");
         handle_react(client_socket, path_decoded);
-    } 
+    }
+    else if (strncmp(path_decoded, "/edit", strlen("/edit")) == 0) {
+        printf("SERVER LOG: Handling /edit request\n");
+        handle_edit(client_socket, path_decoded);
+    }
     else if (strncmp(path_decoded, "/reset", strlen("/reset")) == 0) {
         printf("SERVER LOG: Handling /reset request\n");
         handle_reset(client_socket, path_decoded);
